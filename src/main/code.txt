@@ -1,0 +1,802 @@
+================================================================================
+FILE PATH: TacticalStaminaMod.java
+================================================================================
+
+package com.tacticalstamina;
+
+import com.tacticalstamina.capabilities.StaminaCapability;
+import com.tacticalstamina.network.StaminaNetwork;
+import com.tacticalstamina.registry.StaminaAttributes;
+import net.minecraft.resources.ResourceLocation;
+import com.tacticalstamina.config.StaminaConfig;
+import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.common.capabilities.RegisterCapabilitiesEvent;
+import net.minecraftforge.event.AttachCapabilitiesEvent;
+import net.minecraftforge.fml.ModLoadingContext;
+import net.minecraftforge.fml.config.ModConfig;
+import net.minecraftforge.eventbus.api.IEventBus;
+import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
+import net.minecraftforge.event.entity.EntityAttributeModificationEvent;
+
+@Mod(TacticalStaminaMod.MODID)
+public class TacticalStaminaMod {
+    public static final String MODID = "tactical_stamina";
+
+    public TacticalStaminaMod() {
+        IEventBus modEventBus = FMLJavaModLoadingContext.get().getModEventBus();
+
+        ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, StaminaConfig.COMMON_SPEC);
+        ModLoadingContext.get().registerConfig(ModConfig.Type.CLIENT, StaminaConfig.CLIENT_SPEC);
+
+        StaminaAttributes.ATTRIBUTES.register(modEventBus);
+        modEventBus.addListener(this::attachAttributes);
+        modEventBus.addListener(this::registerCaps);
+
+        StaminaNetwork.register();
+
+        MinecraftForge.EVENT_BUS.register(this);
+        MinecraftForge.EVENT_BUS.addGenericListener(net.minecraft.world.entity.Entity.class, this::attachEntityCaps);
+    }
+
+    private void attachAttributes(EntityAttributeModificationEvent event) {
+        if (!event.has(net.minecraft.world.entity.EntityType.PLAYER, StaminaAttributes.MAX_STAMINA.get())) {
+            event.add(net.minecraft.world.entity.EntityType.PLAYER, StaminaAttributes.MAX_STAMINA.get());
+        }
+    }
+
+    private void registerCaps(RegisterCapabilitiesEvent event) {
+        event.register(StaminaCapability.class);
+    }
+
+    public void attachEntityCaps(AttachCapabilitiesEvent<net.minecraft.world.entity.Entity> event) {
+        if (event.getObject() instanceof net.minecraft.world.entity.player.Player) {
+            if (!event.getObject().getCapability(StaminaCapability.INSTANCE).isPresent()) {
+                event.addCapability(new ResourceLocation(MODID, "stamina"), new StaminaCapability.Provider());
+            }
+        }
+    }
+}
+
+================================================================================
+FILE PATH: capabilities\StaminaCapability.java
+================================================================================
+
+package com.tacticalstamina.capabilities;
+
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.core.Direction;
+import net.minecraftforge.common.capabilities.*;
+import net.minecraftforge.common.util.INBTSerializable;
+import net.minecraftforge.common.util.LazyOptional;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+public class StaminaCapability implements INBTSerializable<CompoundTag> {
+    public static final Capability<StaminaCapability> INSTANCE = CapabilityManager.get(new CapabilityToken<>() {});
+
+    public float stamina = 100.0f;
+    public float maxStamina = 100.0f;
+    public int staminaRegenDelay = 0; 
+    
+    public int fatigueTimer = 0;
+    public float fatiguePenalty = 0.0f;
+    public int penaltyRegenDelay = 0; 
+    public float lastTickStamina = 100.0f;
+
+    public void copyFrom(StaminaCapability other) {
+        this.stamina = other.stamina;
+        this.maxStamina = other.maxStamina;
+        this.staminaRegenDelay = other.staminaRegenDelay;
+        this.fatigueTimer = other.fatigueTimer;
+        this.fatiguePenalty = other.fatiguePenalty;
+        this.penaltyRegenDelay = other.penaltyRegenDelay;
+        this.lastTickStamina = other.lastTickStamina;
+    }
+
+    @Override
+    public CompoundTag serializeNBT() {
+        CompoundTag tag = new CompoundTag();
+        tag.putFloat("Stamina", stamina);
+        tag.putFloat("MaxStamina", maxStamina);
+        tag.putInt("RegenDelay", staminaRegenDelay);
+        tag.putInt("FatigueTimer", fatigueTimer);
+        tag.putFloat("FatiguePenalty", fatiguePenalty);
+        tag.putInt("PenaltyDelay", penaltyRegenDelay);
+        return tag;
+    }
+
+    @Override
+    public void deserializeNBT(CompoundTag nbt) {
+        stamina = nbt.getFloat("Stamina");
+        maxStamina = nbt.getFloat("MaxStamina");
+        staminaRegenDelay = nbt.getInt("RegenDelay");
+        fatigueTimer = nbt.getInt("FatigueTimer");
+        fatiguePenalty = nbt.getFloat("FatiguePenalty");
+        penaltyRegenDelay = nbt.getInt("PenaltyDelay");
+    }
+
+    public static class Provider implements ICapabilityProvider, INBTSerializable<CompoundTag> {
+        private final LazyOptional<StaminaCapability> instance = LazyOptional.of(StaminaCapability::new);
+
+        @Override
+        public <T> @NotNull LazyOptional<T> getCapability(@NotNull Capability<T> cap, @Nullable Direction side) {
+            return cap == INSTANCE ? instance.cast() : LazyOptional.empty();
+        }
+        @Override
+        public CompoundTag serializeNBT() { return instance.orElseThrow(IllegalStateException::new).serializeNBT(); }
+        @Override
+        public void deserializeNBT(CompoundTag nbt) { instance.orElseThrow(IllegalStateException::new).deserializeNBT(nbt); }
+    }
+}
+
+================================================================================
+FILE PATH: client\ClientStaminaEvents.java
+================================================================================
+
+package com.tacticalstamina.client;
+
+import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.vertex.*;
+import com.tacticalstamina.TacticalStaminaMod;
+import com.tacticalstamina.capabilities.StaminaCapability;
+import com.tacticalstamina.config.StaminaConfig; 
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.renderer.GameRenderer;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.client.event.RenderGuiOverlayEvent;
+import net.minecraftforge.client.gui.overlay.VanillaGuiOverlay;
+import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.common.Mod;
+import org.joml.Matrix4f;
+import net.minecraft.world.entity.player.Player;
+import java.lang.reflect.Field;
+import net.minecraftforge.common.capabilities.Capability;
+
+@Mod.EventBusSubscriber(modid = TacticalStaminaMod.MODID, value = Dist.CLIENT)
+public class ClientStaminaEvents {
+
+    private static float displayedStamina = 100.0f;
+    private static float displayedPenalty = 0.0f;
+    private static float displayedHunger = 0.0f;
+    private static float displayedHydration = 0.0f;
+
+    @SubscribeEvent
+    public static void onRenderGuiOverlayPost(RenderGuiOverlayEvent.Post event) {
+        if (event.getOverlay().id().equals(VanillaGuiOverlay.EXPERIENCE_BAR.id())) {
+            renderStaminaHUD(event.getGuiGraphics());
+        }
+    }
+
+    private static void renderStaminaHUD(GuiGraphics gfx) {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null || mc.options.hideGui || (mc.gameMode != null && !mc.gameMode.canHurtPlayer())) return;
+        mc.player.getCapability(StaminaCapability.INSTANCE).ifPresent(cap -> {
+            int width = mc.getWindow().getGuiScaledWidth();
+            int height = mc.getWindow().getGuiScaledHeight();
+
+            float hungerPenaltyVal = 0.0f;
+            float hydrationPenaltyVal = 0.0f;
+            float maxHungerPen = StaminaConfig.COMMON.maxHungerPenalty.get().floatValue();
+            float maxHydroPen = StaminaConfig.COMMON.maxHydrationPenalty.get().floatValue();
+
+            if (StaminaConfig.COMMON.useTraumaStats.get()) {
+                 float[] traumaStats = getTraumaStats(mc.player);
+                 if (traumaStats != null) {
+                     float currentEnergy = traumaStats[0];
+                     float currentHydro = traumaStats[1];
+                     float tThreshold = StaminaConfig.COMMON.traumaThreshold.get().floatValue();
+                     
+                     float energyDeficit = Math.max(0, tThreshold - currentEnergy);
+                     float hydroDeficit = Math.max(0, tThreshold - currentHydro);
+                     
+                     if (energyDeficit > 0 && tThreshold > 0) {
+                         hungerPenaltyVal = (energyDeficit / tThreshold) * maxHungerPen;
+                     }
+                     if (hydroDeficit > 0 && tThreshold > 0) {
+                         hydrationPenaltyVal = (hydroDeficit / tThreshold) * maxHydroPen;
+                     }
+                 }
+            } else {
+                int foodLevel = mc.player.getFoodData().getFoodLevel();
+                int hungerThreshold = StaminaConfig.COMMON.hungerPenaltyThreshold.get();
+            
+                if (foodLevel <= hungerThreshold && hungerThreshold > 0) {
+                    hungerPenaltyVal = ((float)(hungerThreshold - foodLevel) / (float)hungerThreshold) * maxHungerPen;
+                }
+            }
+
+            displayedStamina += (cap.stamina - displayedStamina) * 0.2f;
+            displayedPenalty += (cap.fatiguePenalty - displayedPenalty) * 0.1f;
+            displayedHunger += (hungerPenaltyVal - displayedHunger) * 0.1f; 
+            displayedHydration += (hydrationPenaltyVal - displayedHydration) * 0.1f;
+
+            if (Math.abs(cap.stamina - displayedStamina) < 0.05f) displayedStamina = cap.stamina;
+            if (Math.abs(cap.fatiguePenalty - displayedPenalty) < 0.05f) displayedPenalty = cap.fatiguePenalty;
+            if (Math.abs(hungerPenaltyVal - displayedHunger) < 0.05f) displayedHunger = hungerPenaltyVal;
+            if (Math.abs(hydrationPenaltyVal - displayedHydration) < 0.05f) displayedHydration = hydrationPenaltyVal;
+
+            float baseMax = 100.0f; 
+ 
+            int sBarW = StaminaConfig.CLIENT.barWidth.get();
+            int sBarH = StaminaConfig.CLIENT.barHeight.get();
+
+            int offsetX = StaminaConfig.CLIENT.barXOffset.get();
+            int sBarX = (width / 2) - (sBarW / 2) + offsetX;
+
+            int offsetY = StaminaConfig.CLIENT.barYOffset.get();
+            int sBarY = height - offsetY; 
+
+            int bgCol = 0xFF000000 | StaminaConfig.CLIENT.colorBackground.get();
+            int safeCol = 0xFF000000 | StaminaConfig.CLIENT.colorSafe.get();
+            int critCol = 0xFF000000 | StaminaConfig.CLIENT.colorCritical.get();
+            int tirelessCol = 0xFF000000 | StaminaConfig.CLIENT.colorTireless.get();
+            int stripeCol = 0xFF000000 | StaminaConfig.CLIENT.colorStripes.get();
+            
+            int energyCol = 0xFF000000 | StaminaConfig.CLIENT.colorPenaltyEnergy.get();
+            int hydroCol  = 0xFF000000 | StaminaConfig.CLIENT.colorPenaltyHydration.get();
+            int sepCol = 0xFF000000;
+
+            gfx.fill(sBarX - 1, sBarY - 1, sBarX + sBarW + 1, sBarY + sBarH + 1, 0xFF000000);
+            gfx.fill(sBarX, sBarY, sBarX + sBarW, sBarY + sBarH, bgCol);
+
+            float fatiguePct = displayedPenalty / baseMax;
+            int fatiguePx = (int)(sBarW * fatiguePct);
+
+            float hungerPct = displayedHunger / baseMax;
+            int hungerPx = (int)(sBarW * hungerPct);
+
+            float hydroPct = displayedHydration / baseMax;
+            int hydroPx = (int)(sBarW * hydroPct);
+
+            int currentRightEdge = sBarW;
+
+            if (fatiguePx > 0) {
+                int startX = sBarW - fatiguePx;
+                drawStripesHUD(gfx, sBarX + startX, sBarY, fatiguePx, sBarH, stripeCol);
+                gfx.fill(sBarX + startX, sBarY, sBarX + startX + 1, sBarY + sBarH, sepCol);
+                currentRightEdge -= fatiguePx;
+            }
+
+            if (hungerPx > 0) {
+                int startX = currentRightEdge - hungerPx;
+                drawStripesHUD(gfx, sBarX + startX, sBarY, hungerPx, sBarH, energyCol); 
+                gfx.fill(sBarX + startX, sBarY, sBarX + startX + 1, sBarY + sBarH, sepCol);
+                currentRightEdge -= hungerPx;
+            }
+
+            if (hydroPx > 0) {
+                int startX = currentRightEdge - hydroPx;
+                drawStripesHUD(gfx, sBarX + startX, sBarY, hydroPx, sBarH, hydroCol); 
+                gfx.fill(sBarX + startX, sBarY, sBarX + startX + 1, sBarY + sBarH, sepCol);
+                currentRightEdge -= hydroPx;
+            }
+
+            int colorTop;
+            int colorBottom;
+            if (mc.player.hasEffect(net.minecraft.world.effect.MobEffects.MOVEMENT_SPEED)) { 
+                 colorBottom = tirelessCol;
+                 colorTop = tirelessCol + 0x002222; 
+            } else if (displayedStamina <= 25.0f) {
+                 colorBottom = critCol;
+                 colorTop = critCol + 0x222222;
+            } else {
+                 colorBottom = safeCol;
+                 colorTop = safeCol + 0x222222;
+            }
+
+            float fillPct = Math.min(1.0f, Math.max(0.0f, displayedStamina / baseMax));
+            int fillW = (int) (sBarW * fillPct);
+            
+            if (fillW > 0) {
+                int maxFillW = currentRightEdge;
+                int renderW = Math.min(fillW, maxFillW);
+                if (renderW > 0) {
+                    gfx.fillGradient(sBarX, sBarY, sBarX + renderW, sBarY + sBarH, colorTop, colorBottom);
+                    if (renderW < currentRightEdge) {
+                        gfx.fill(sBarX + renderW, sBarY, sBarX + renderW + 1, sBarY + sBarH, sepCol);
+                    }
+                }
+            }
+        });
+    }
+
+    private static void drawStripesHUD(GuiGraphics gfx, int x, int y, int w, int h, int colorRGB) {
+        if (w <= 0) return;
+        gfx.enableScissor(x, y, x + w, y + h);
+        RenderSystem.enableBlend();
+
+        int bandWidth = 2; int gap = 2;
+        int totalHeight = h + w + 20;
+        int r = (colorRGB >> 16) & 0xFF;
+        int g = (colorRGB >> 8) & 0xFF; int b = colorRGB & 0xFF; int a = 200;
+        Tesselator tesselator = Tesselator.getInstance();
+        BufferBuilder buffer = tesselator.getBuilder();
+        RenderSystem.setShader(GameRenderer::getPositionColorShader);
+        Matrix4f matrix = gfx.pose().last().pose();
+
+        buffer.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
+        for (int i = -20; i < totalHeight; i += (bandWidth + gap)) {
+            float yStart = y + i;
+            buffer.vertex(matrix, x, yStart, 0).color(r, g, b, a).endVertex();
+            buffer.vertex(matrix, x, yStart + bandWidth, 0).color(r, g, b, a).endVertex();
+            buffer.vertex(matrix, x + w * 2, yStart - w + bandWidth, 0).color(r, g, b, a).endVertex();
+            buffer.vertex(matrix, x + w * 2, yStart - w, 0).color(r, g, b, a).endVertex();
+        }
+        tesselator.end();
+        RenderSystem.disableBlend();
+        gfx.disableScissor();
+    }
+    
+    private static float[] getTraumaStats(Player player) {
+        try {
+            Class<?> limbCapClass = Class.forName("com.trauma.LimbCapability");
+            Field instanceField = limbCapClass.getField("INSTANCE");
+            Object capabilityToken = instanceField.get(null);
+            
+            if (capabilityToken instanceof Capability) {
+                var lazyOpt = player.getCapability((Capability<?>) capabilityToken);
+                if (lazyOpt.isPresent()) {
+                    Object limbInstance = lazyOpt.orElse(null);
+                    if (limbInstance != null) {
+                        float e = limbInstance.getClass().getField("energy").getFloat(limbInstance);
+                        float h = limbInstance.getClass().getField("hydration").getFloat(limbInstance);
+                        return new float[]{e, h};
+                    }
+                }
+            }
+        } catch (Exception e) {
+        }
+        return null;
+    }
+}
+
+================================================================================
+FILE PATH: config\StaminaConfig.java
+================================================================================
+
+package com.tacticalstamina.config;
+
+import net.minecraftforge.common.ForgeConfigSpec;
+import org.apache.commons.lang3.tuple.Pair;
+
+public class StaminaConfig {
+    public static final Common COMMON;
+    public static final ForgeConfigSpec COMMON_SPEC;
+
+    public static final Client CLIENT;
+    public static final ForgeConfigSpec CLIENT_SPEC;
+
+    static {
+        final Pair<Common, ForgeConfigSpec> commonSpecPair = new ForgeConfigSpec.Builder().configure(Common::new);
+        COMMON_SPEC = commonSpecPair.getRight();
+        COMMON = commonSpecPair.getLeft();
+
+        final Pair<Client, ForgeConfigSpec> clientSpecPair = new ForgeConfigSpec.Builder().configure(Client::new);
+        CLIENT_SPEC = clientSpecPair.getRight();
+        CLIENT = clientSpecPair.getLeft();
+    }
+
+    public static class Common {
+        public final ForgeConfigSpec.DoubleValue depletionSprint;
+        public final ForgeConfigSpec.DoubleValue depletionJump;
+        public final ForgeConfigSpec.DoubleValue depletionAttack;
+        public final ForgeConfigSpec.DoubleValue depletionBlockBreak;
+        public final ForgeConfigSpec.DoubleValue depletionSwim;
+        public final ForgeConfigSpec.DoubleValue depletionClimb;
+
+        public final ForgeConfigSpec.DoubleValue recoveryPerTick;
+        public final ForgeConfigSpec.DoubleValue recoveryRestMult;
+        public final ForgeConfigSpec.DoubleValue recoveryClimbMult; // NEW
+        public final ForgeConfigSpec.IntValue recoveryDelay;
+
+        public final ForgeConfigSpec.DoubleValue minMaxStamina;
+        public final ForgeConfigSpec.DoubleValue fatigueThreshold; 
+
+        public final ForgeConfigSpec.IntValue penaltyRecoveryDelay;
+        public final ForgeConfigSpec.DoubleValue penaltyBaseRate; 
+        public final ForgeConfigSpec.DoubleValue penaltyCurveFactor;
+        
+        public final ForgeConfigSpec.DoubleValue maxExertionPenalty;
+        public final ForgeConfigSpec.DoubleValue maxHungerPenalty;
+        public final ForgeConfigSpec.DoubleValue maxHydrationPenalty;
+        public final ForgeConfigSpec.IntValue hungerPenaltyThreshold;
+
+        public final ForgeConfigSpec.BooleanValue useTraumaStats;
+        public final ForgeConfigSpec.DoubleValue traumaThreshold;
+
+        public Common(ForgeConfigSpec.Builder builder) {
+            builder.push("Depletion Rates");
+            depletionSprint = builder.comment("Stamina drained per tick while sprinting").defineInRange("depletionSprint", 0.15, 0.0, 100.0);
+            depletionJump = builder.comment("Stamina drained per jump").defineInRange("depletionJump", 0.85, 0.0, 100.0);
+            depletionAttack = builder.comment("Stamina drained per attack").defineInRange("depletionAttack", 3.45, 0.0, 100.0);
+            depletionBlockBreak = builder.comment("Stamina drained per block broken").defineInRange("depletionBlockBreak", 1.1, 0.0, 100.0);
+            depletionSwim = builder.comment("Stamina drained per tick while swimming").defineInRange("depletionSwim", 0.05, 0.0, 100.0);
+            depletionClimb = builder.comment("Stamina drained per tick while climbing").defineInRange("depletionClimb", 0.7, 0.0, 100.0);
+            builder.pop();
+
+            builder.push("Recovery Settings");
+            recoveryPerTick = builder.comment("Stamina recovered per tick").defineInRange("recoveryPerTick", 0.36, 0.0, 100.0);
+            recoveryRestMult = builder.comment("Multiplier for recovery when standing still").defineInRange("recoveryRestMult", 1.45, 1.0, 10.0);
+            recoveryClimbMult = builder.comment("Multiplier for recovery when hanging on a ladder/vine (not moving)").defineInRange("recoveryClimbMult", 0.2, 0.0, 10.0);
+            recoveryDelay = builder.comment("Ticks before stamina starts regenerating after action (20 ticks = 1 sec)").defineInRange("recoveryDelay", 50, 0, 2000);
+            builder.pop();
+
+            builder.push("Fatigue & Limits");
+            minMaxStamina = builder.comment("The absolute floor for Max Stamina (Stamina bar cannot shrink smaller than this)").defineInRange("minMaxStamina", 10.0, 1.0, 100.0);
+            fatigueThreshold = builder.comment("Percentage of Max Stamina where fatigue penalty starts (0.25 = 25%)").defineInRange("fatigueThreshold", 0.25, 0.0, 1.0);
+            penaltyRecoveryDelay = builder.comment("Ticks to wait after leaving red zone before penalty recovers").defineInRange("penaltyRecoveryDelay", 100, 0, 2000);
+            penaltyBaseRate = builder.comment("Base rate for exponential penalty increase").defineInRange("penaltyBaseRate", 0.02, 0.0, 10.0);
+            penaltyCurveFactor = builder.comment("Divisor for exponential curve (Lower = Steeper curve)").defineInRange("penaltyCurveFactor", 150.0, 1.0, 1000.0);
+            maxExertionPenalty = builder.comment("Maximum reduction to Max Stamina caused by physical exhaustion").defineInRange("maxExertionPenalty", 30.0, 0.0, 100.0);
+            maxHungerPenalty = builder.comment("Maximum reduction to Max Stamina caused by starvation/energy loss").defineInRange("maxHungerPenalty", 30.0, 0.0, 100.0);
+            maxHydrationPenalty = builder.comment("Maximum reduction to Max Stamina caused by dehydration (Trauma only)").defineInRange("maxHydrationPenalty", 30.0, 0.0, 100.0);
+            hungerPenaltyThreshold = builder.comment("Food level at which stamina penalty begins (6 = 3 shanks)").defineInRange("hungerPenaltyThreshold", 6, 0, 20);
+            builder.pop();
+
+            builder.push("Integrations");
+            useTraumaStats = builder.comment("If true, uses Trauma mod's Energy/Hydration for penalties instead of Vanilla Hunger").define("useTraumaStats", false);
+            traumaThreshold = builder.comment("Trauma Energy/Hydration level (0-100) at which penalties begin").defineInRange("traumaThreshold", 30.0, 0.0, 100.0);
+            builder.pop();
+        }
+    }
+
+    public static class Client {
+        public final ForgeConfigSpec.IntValue barXOffset;
+        public final ForgeConfigSpec.IntValue barYOffset;
+        public final ForgeConfigSpec.IntValue barWidth;
+        public final ForgeConfigSpec.IntValue barHeight;
+        public final ForgeConfigSpec.IntValue colorBackground;
+        public final ForgeConfigSpec.IntValue colorSafe;
+        public final ForgeConfigSpec.IntValue colorCritical;
+        public final ForgeConfigSpec.IntValue colorTireless;
+        public final ForgeConfigSpec.IntValue colorStripes;
+        
+        public final ForgeConfigSpec.IntValue colorPenaltyEnergy;
+        public final ForgeConfigSpec.IntValue colorPenaltyHydration;
+
+        public Client(ForgeConfigSpec.Builder builder) {
+            builder.push("HUD Layout");
+            barXOffset = builder.comment("Horizontal offset from center").defineInRange("barXOffset", 0, -1000, 1000);
+            barYOffset = builder.comment("Vertical offset from bottom").defineInRange("barYOffset", 24, 0, 1000);
+            barWidth = builder.comment("Width of the bar in pixels").defineInRange("barWidth", 180, 1, 1000);
+            barHeight = builder.comment("Height of the bar in pixels").defineInRange("barHeight", 2, 1, 100);
+            builder.pop();
+
+            builder.push("Colors");
+            colorBackground = builder.defineInRange("colorBackground", 2236962, 0, 16777215);
+            colorSafe = builder.defineInRange("colorSafe", 65280, 0, 16777215);
+            colorCritical = builder.defineInRange("colorCritical", 16711680, 0, 16777215);
+            colorTireless = builder.defineInRange("colorTireless", 65450, 0, 16777215);
+            colorStripes = builder.defineInRange("colorStripes", 16711680, 0, 16777215);
+            
+            colorPenaltyEnergy = builder.comment("Color for Hunger/Energy penalty stripes").defineInRange("colorPenaltyEnergy", 16763904, 0, 16777215);
+            colorPenaltyHydration = builder.comment("Color for Hydration penalty stripes (Trauma integration only)").defineInRange("colorPenaltyHydration", 5636095, 0, 16777215);
+            builder.pop();
+        }
+    }
+}
+
+================================================================================
+FILE PATH: handlers\ServerStaminaHandler.java
+================================================================================
+
+package com.tacticalstamina.handlers;
+
+import com.tacticalstamina.TacticalStaminaMod;
+import com.tacticalstamina.capabilities.StaminaCapability;
+import com.tacticalstamina.config.StaminaConfig;
+import com.tacticalstamina.network.PacketSyncStamina;
+import com.tacticalstamina.network.StaminaNetwork;
+import com.tacticalstamina.registry.StaminaAttributes;
+import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+import net.minecraft.world.entity.player.Player;
+import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.entity.living.LivingEvent;
+import net.minecraftforge.event.entity.player.AttackEntityEvent;
+import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.network.PacketDistributor;
+import java.lang.reflect.Field;
+import net.minecraftforge.common.capabilities.Capability;
+
+@Mod.EventBusSubscriber(modid = TacticalStaminaMod.MODID)
+public class ServerStaminaHandler {
+
+    @SubscribeEvent
+    public static void onPlayerTick(TickEvent.PlayerTickEvent event) {
+        if (event.phase != TickEvent.Phase.START || event.player.level().isClientSide) return;
+        Player player = event.player;
+        player.getCapability(StaminaCapability.INSTANCE).ifPresent(cap -> {
+
+            double baseAttr = 100.0;
+            AttributeInstance attr = player.getAttribute(StaminaAttributes.MAX_STAMINA.get());
+            if (attr != null) baseAttr = attr.getValue();
+
+            float energyPenalty = 0.0f;
+            float hydrationPenalty = 0.0f;
+            float maxHungerPen = StaminaConfig.COMMON.maxHungerPenalty.get().floatValue();
+            float maxHydroPen = StaminaConfig.COMMON.maxHydrationPenalty.get().floatValue();
+
+            if (StaminaConfig.COMMON.useTraumaStats.get()) {
+                float[] traumaStats = getTraumaStats(player);
+                
+                if (traumaStats != null) {
+                    float currentEnergy = traumaStats[0];
+                    float currentHydro = traumaStats[1];
+                    float tThreshold = StaminaConfig.COMMON.traumaThreshold.get().floatValue();
+                    
+                    float energyDeficit = Math.max(0, tThreshold - currentEnergy);
+                    float hydroDeficit = Math.max(0, tThreshold - currentHydro);
+
+                    if (energyDeficit > 0 && tThreshold > 0) {
+                        energyPenalty = (energyDeficit / tThreshold) * maxHungerPen;
+                    }
+
+                    if (hydroDeficit > 0 && tThreshold > 0) {
+                        hydrationPenalty = (hydroDeficit / tThreshold) * maxHydroPen;
+                    }
+                }
+            } else {
+                int foodLevel = player.getFoodData().getFoodLevel();
+                int hungerThreshold = StaminaConfig.COMMON.hungerPenaltyThreshold.get();
+
+                if (foodLevel <= hungerThreshold && hungerThreshold > 0) {
+                    energyPenalty = ((float)(hungerThreshold - foodLevel) / (float)hungerThreshold) * maxHungerPen;
+                }
+            }
+
+            float minMax = StaminaConfig.COMMON.minMaxStamina.get().floatValue();
+            
+            float effectiveMax = (float) baseAttr - cap.fatiguePenalty - energyPenalty - hydrationPenalty;
+            
+            if (effectiveMax < minMax) effectiveMax = minMax;
+            cap.maxStamina = effectiveMax;
+
+            boolean isConsuming = false;
+            
+            if (player.isSwimming()) {
+                cap.stamina -= StaminaConfig.COMMON.depletionSwim.get().floatValue();
+                isConsuming = true;
+            } else if (player.onClimbable() && Math.abs(player.getDeltaMovement().y) > 0.1) {
+                cap.stamina -= StaminaConfig.COMMON.depletionClimb.get().floatValue();
+                isConsuming = true;
+            } else if (player.isSprinting()) {
+                cap.stamina -= StaminaConfig.COMMON.depletionSprint.get().floatValue();
+                isConsuming = true;
+            }
+
+            if (isConsuming) {
+                cap.staminaRegenDelay = StaminaConfig.COMMON.recoveryDelay.get();
+            } else {
+                if (cap.staminaRegenDelay > 0) {
+                    cap.staminaRegenDelay--;
+                } else if (cap.stamina < cap.maxStamina) {
+                    float recovery = StaminaConfig.COMMON.recoveryPerTick.get().floatValue();
+                    
+                    if (player.onClimbable()) {
+                        recovery *= StaminaConfig.COMMON.recoveryClimbMult.get().floatValue();
+                    } else if (player.getDeltaMovement().lengthSqr() < 0.005) {
+                        recovery *= StaminaConfig.COMMON.recoveryRestMult.get().floatValue();
+                    }
+                    
+                    cap.stamina += recovery;
+                }
+            }
+
+            if (cap.stamina < 0) cap.stamina = 0;
+            if (cap.stamina > cap.maxStamina) cap.stamina = cap.maxStamina;
+            if (cap.stamina <= 0 && player.isSprinting()) player.setSprinting(false);
+            
+            float fatigueThresh = StaminaConfig.COMMON.fatigueThreshold.get().floatValue();
+            if (cap.stamina <= (baseAttr * fatigueThresh)) {
+                cap.fatigueTimer++;
+                cap.penaltyRegenDelay = StaminaConfig.COMMON.penaltyRecoveryDelay.get(); 
+            } else {
+                cap.fatigueTimer = 0;
+            }
+
+            boolean isRecovering = cap.stamina > cap.lastTickStamina + 0.001f;
+            if (cap.fatigueTimer > 240) {
+                if (!isRecovering) {
+                    float maxExertion = StaminaConfig.COMMON.maxExertionPenalty.get().floatValue();
+                    if (cap.fatiguePenalty < maxExertion) {
+                        float baseRate = StaminaConfig.COMMON.penaltyBaseRate.get().floatValue();
+                        float curve = StaminaConfig.COMMON.penaltyCurveFactor.get().floatValue();
+                        
+                        float ticksExceeded = (float)(cap.fatigueTimer - 240);
+                        float exponentialRate = baseRate * (float) Math.exp(ticksExceeded / curve);
+                        cap.fatiguePenalty += exponentialRate;
+                        
+                        if (cap.fatiguePenalty > maxExertion) cap.fatiguePenalty = maxExertion;
+                    }
+                }
+            } 
+            else if (cap.fatigueTimer == 0 && cap.fatiguePenalty > 0) {
+                if (cap.penaltyRegenDelay > 0) {
+                    cap.penaltyRegenDelay--;
+                } else {
+                    cap.fatiguePenalty = Math.max(0.0f, cap.fatiguePenalty - (50.0f / 1200.0f));
+                }
+            }
+
+            cap.lastTickStamina = cap.stamina;
+            if (player.tickCount % 5 == 0 || isConsuming) { 
+                StaminaNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> (net.minecraft.server.level.ServerPlayer) player), 
+                    new PacketSyncStamina(cap.stamina, cap.maxStamina, cap.fatiguePenalty));
+            }
+        });
+    }
+
+    @SubscribeEvent
+    public static void onJump(LivingEvent.LivingJumpEvent event) {
+        if (event.getEntity() instanceof Player p && !p.level().isClientSide) {
+            p.getCapability(StaminaCapability.INSTANCE).ifPresent(c -> { 
+                c.stamina -= StaminaConfig.COMMON.depletionJump.get().floatValue(); 
+                c.staminaRegenDelay = StaminaConfig.COMMON.recoveryDelay.get(); 
+            });
+        }
+    }
+    
+    @SubscribeEvent
+    public static void onAttack(AttackEntityEvent event) {
+        if (!event.getEntity().level().isClientSide) {
+            event.getEntity().getCapability(StaminaCapability.INSTANCE).ifPresent(c -> { 
+                c.stamina -= StaminaConfig.COMMON.depletionAttack.get().floatValue(); 
+                c.staminaRegenDelay = StaminaConfig.COMMON.recoveryDelay.get(); 
+            });
+        }
+    }
+    
+    @SubscribeEvent
+    public static void onBlockBroken(net.minecraftforge.event.level.BlockEvent.BreakEvent event) {
+        if (!event.getPlayer().level().isClientSide) {
+            event.getPlayer().getCapability(StaminaCapability.INSTANCE).ifPresent(c -> { 
+                c.stamina -= StaminaConfig.COMMON.depletionBlockBreak.get().floatValue(); 
+                c.staminaRegenDelay = StaminaConfig.COMMON.recoveryDelay.get(); 
+            });
+        }
+    }
+
+    private static float[] getTraumaStats(Player player) {
+        try {
+            Class<?> limbCapClass = Class.forName("com.trauma.LimbCapability");
+            Field instanceField = limbCapClass.getField("INSTANCE");
+            Object capabilityToken = instanceField.get(null);
+            
+            if (capabilityToken instanceof Capability) {
+                var lazyOpt = player.getCapability((Capability<?>) capabilityToken);
+                if (lazyOpt.isPresent()) {
+                    Object limbInstance = lazyOpt.orElse(null);
+                    if (limbInstance != null) {
+                        float e = limbInstance.getClass().getField("energy").getFloat(limbInstance);
+                        float h = limbInstance.getClass().getField("hydration").getFloat(limbInstance);
+                        return new float[]{e, h};
+                    }
+                }
+            }
+        } catch (Exception e) {
+        }
+        return null;
+    }
+}
+
+================================================================================
+FILE PATH: mixin\MixinLocalPlayer.java
+================================================================================
+
+package com.tacticalstamina.mixin;
+
+import com.tacticalstamina.capabilities.StaminaCapability;
+import net.minecraft.client.player.LocalPlayer;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+@Mixin(LocalPlayer.class)
+public class MixinLocalPlayer {
+
+    @Inject(method = "canStartSprinting", at = @At("HEAD"), cancellable = true)
+    private void preventSprinting(CallbackInfoReturnable<Boolean> cir) {
+        LocalPlayer player = (LocalPlayer) (Object) this;
+
+        player.getCapability(StaminaCapability.INSTANCE).ifPresent(cap -> {
+            if (cap.stamina <= 0) {
+                cir.setReturnValue(false);
+            }
+        });
+    }
+}
+
+================================================================================
+FILE PATH: network\PacketSyncStamina.java
+================================================================================
+
+package com.tacticalstamina.network;
+
+import com.tacticalstamina.capabilities.StaminaCapability;
+import net.minecraft.client.Minecraft;
+import net.minecraft.network.FriendlyByteBuf;
+import net.minecraftforge.network.NetworkEvent;
+import java.util.function.Supplier;
+
+public class PacketSyncStamina {
+    private final float stamina, maxStamina, fatiguePenalty;
+
+    public PacketSyncStamina(float stamina, float maxStamina, float fatiguePenalty) {
+        this.stamina = stamina;
+        this.maxStamina = maxStamina;
+        this.fatiguePenalty = fatiguePenalty;
+    }
+
+    public static void encode(PacketSyncStamina msg, FriendlyByteBuf buf) {
+        buf.writeFloat(msg.stamina);
+        buf.writeFloat(msg.maxStamina);
+        buf.writeFloat(msg.fatiguePenalty);
+    }
+
+    public static PacketSyncStamina decode(FriendlyByteBuf buf) {
+        return new PacketSyncStamina(buf.readFloat(), buf.readFloat(), buf.readFloat());
+    }
+
+    public static void handle(PacketSyncStamina msg, Supplier<NetworkEvent.Context> ctx) {
+        ctx.get().enqueueWork(() -> {
+            if (Minecraft.getInstance().player != null) {
+                Minecraft.getInstance().player.getCapability(StaminaCapability.INSTANCE).ifPresent(cap -> {
+                    cap.stamina = msg.stamina;
+                    cap.maxStamina = msg.maxStamina;
+                    cap.fatiguePenalty = msg.fatiguePenalty;
+                });
+            }
+        });
+        ctx.get().setPacketHandled(true);
+    }
+}
+
+================================================================================
+FILE PATH: network\StaminaNetwork.java
+================================================================================
+
+package com.tacticalstamina.network;
+
+import com.tacticalstamina.TacticalStaminaMod;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraftforge.network.NetworkRegistry;
+import net.minecraftforge.network.simple.SimpleChannel;
+
+public class StaminaNetwork {
+    private static final String PROTOCOL_VERSION = "1";
+    public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
+        new ResourceLocation(TacticalStaminaMod.MODID, "main"),
+        () -> PROTOCOL_VERSION, PROTOCOL_VERSION::equals, PROTOCOL_VERSION::equals
+    );
+
+    public static void register() {
+        int id = 0;
+        CHANNEL.registerMessage(id++, PacketSyncStamina.class, PacketSyncStamina::encode, PacketSyncStamina::decode, PacketSyncStamina::handle);
+    }
+}
+
+================================================================================
+FILE PATH: registry\StaminaAttributes.java
+================================================================================
+
+package com.tacticalstamina.registry;
+
+import com.tacticalstamina.TacticalStaminaMod;
+import net.minecraft.world.entity.ai.attributes.Attribute;
+import net.minecraft.world.entity.ai.attributes.RangedAttribute;
+import net.minecraftforge.registries.DeferredRegister;
+import net.minecraftforge.registries.ForgeRegistries;
+import net.minecraftforge.registries.RegistryObject;
+
+public class StaminaAttributes {
+    public static final DeferredRegister<Attribute> ATTRIBUTES = 
+        DeferredRegister.create(ForgeRegistries.ATTRIBUTES, TacticalStaminaMod.MODID);
+
+    public static final RegistryObject<Attribute> MAX_STAMINA = ATTRIBUTES.register("generic.max_stamina",
+            () -> new RangedAttribute("attribute.name.tactical_stamina.max_stamina", 100.0D, 0.0D, 1024.0D).setSyncable(true));
+}
+
