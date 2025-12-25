@@ -1,4 +1,4 @@
-# Tactical Stamina
+# Peak Stamina
 
 Replaces vanilla sprinting mechanics with a resource management system based on fatigue and hunger.
 
@@ -12,7 +12,7 @@ Replaces vanilla sprinting mechanics with a resource management system based on 
 ![Preview of the stamina bar with hunger penalty and fatigue penalty applied](https://cdn.modrinth.com/data/cached_images/e42f52d0f09ffb6a271181fa78ff0bd48b192d7b.png)
 
 ## Configuration
-All values are adjustable in `config/tactical_stamina-common.toml`.
+All values are adjustable in `config/peak_stamina-common.toml`.
 
 ### General
 * `enableStamina` (Default: `true`): Master switch for the mod.
@@ -39,7 +39,7 @@ All values are adjustable in `config/tactical_stamina-common.toml`.
 * `minMaxStamina` (Default: `10.0`): Hard floor for max stamina (bar cannot shrink below this).
 * `penaltyRecoveryDelay` (Default: `100`): Ticks before fatigue heals after resting.
 
-### Client Config (`tactical_stamina-client.toml`)
+### Client Config (`peak_stamina-client.toml`)
 * **Position:** `barXOffset`, `barYOffset`.
 * **Size:** `barWidth`, `barHeight`.
 * **Colors:** Full Hex code support for the bar, background, and penalty stripes.
